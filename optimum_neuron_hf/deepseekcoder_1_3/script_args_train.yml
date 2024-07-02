@@ -1,0 +1,49 @@
+# MODEL AND GENERAL ARGS
+model_base: deepseek-ai/deepseek-coder-1.3b-base
+# output for checkpoints and model
+output_dir: ./tmp_training_output_1_3b
+overwrite_output_dir: true
+
+# CHECKPOINTING IS NOT CURRENTLY WORKING - STILL NEED TO FIGURE THIS OUT
+# if starting from checkpoint, use:
+# resume_from_checkpoint: ./tmp_training_output_1_3b
+# otherwise, use:
+resume_from_checkpoint: null
+bf16: true
+tensor_parallel_size: 4 # split the model across multiple devices - required for bigger models
+zero_1: true # use zero redundancy optimizer to save memory
+# gradient_checkpointing: true # need to check this as well
+
+# for precompilation it is max_steps to limit the number of iterations 
+# max_steps: 20
+# for training it's num_train_epochs:
+num_train_epochs: 2
+
+
+# Additional arguments, currently not used (see how to add in ScriptArgs)
+# pad_index: 32018
+# shuffle: true
+
+# TRAINING
+do_train: true
+dataset_paths:
+- ../emca_data/tokenized_data_limited
+gradient_accumulation_steps: 4
+per_device_train_batch_size: 8
+
+# VALIDATION
+do_eval: true
+# if do_eval is true, a validation dataset is required
+validation_paths:
+- ../emca_data/tokenized_sample-length-512_fim-hole-512_bb-flat_validation
+eval_accumulation_steps: 4
+per_device_eval_batch_size: 8
+evaluation_strategy: steps
+eval_steps: 100
+
+# SAVE STRATEGY
+
+save_steps: 300
+save_strategy: steps
+skip_cache_push: true
+# save_total_limit: 1 # need to test this
