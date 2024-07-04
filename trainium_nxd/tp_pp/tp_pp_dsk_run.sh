@@ -1,6 +1,9 @@
 #!/bin/bash
 set -ex
 
+# run: sbatch --exclusive --nodes 2 --cpus-per-task 128 --wrap="srun neuron_parallel_compile bash $(pwd)/tp_pp_dsk_run.sh"
+# later: sbatch --exclusive --nodes 2 --cpus-per-task 128 --wrap="srun bash $(pwd)/tp_pp_dsk_run.sh"
+
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 sudo sysctl -w net.ipv4.ip_local_reserved_ports=44000
 
@@ -12,10 +15,10 @@ export NEURON_FUSE_SOFTMAX=1
 export NEURON_RT_ASYNC_EXEC_MAX_INFLIGHT_REQUESTS=7
 export MALLOC_ARENA_MAX=128
 export XLA_DOWNCAST_BF16=1
-export NEURON_CC_FLAGS="--model-type=transformer --distribution-strategy=llm-training --cache_dir=$HOME/cache_dir_neuron/"
+export NEURON_CC_FLAGS="--model-type=transformer --distribution-strategy=llm-training --cache_dir=$HOME/cache_dir_neuron/ --retry_failed_compilation"
 
 PROCESSES_PER_NODE=32
-WORLD_SIZE=1
+WORLD_SIZE=2
 NODEID=0
 HOSTNAME=`hostname`
 if [ -v SLURM_NTASKS ]; then
@@ -44,15 +47,15 @@ mkdir -p $LOG_PATH
 echo "Nodeinfo NODEID $NODEID hostname $HOSTNAME"
 echo $DISTRIBUTED_ARGS
 
-SCRIPT_DIR="/home/ubuntu/dev/tp_pp_dsk_nxd"
-PRETRAINED_WEIGHT="/home/ubuntu/dev/tp_pp_dsk_nxd/dsk-33b-base-pretrained"
+SCRIPT_DIR="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp"
+PRETRAINED_WEIGHT="/home/ubuntu/pp8_tp8"
 
 # Global batch size
 : ${GBS:=1}
 # Input sequence length
-SEQ_LEN=512
+SEQ_LEN=1536
 # Pipeline parallel degree
-PP_DEGREE=4
+PP_DEGREE=8
 # Tensor parallel degree
 TP_DEGREE=8
 # Data paralell size
@@ -63,19 +66,19 @@ BS=$(($GBS / $DP))
 # Setting same as BS so each microbatch contains a single datasample
 NUM_MICROBATCHES=$BS
 # DATA_PATH="$HOME/examples_datasets/wikicorpus_llama2_7B_tokenized_4k"
-DATA_PATH="/home/ubuntu/dev/train_dsk/raw_data_tokenized/training_v1"
+DATA_PATH="/home/ubuntu/data_1536"
 
 
 if [ "$NEURON_EXTRACT_GRAPHS_ONLY" = "1" ]; then
     max_steps=10
-    tb_dir="/home/ubuntu/dev/tp_pp_dsk_nxd/shared/tensorboard/dsk33B_compile"
+    tb_dir="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp/shared/tensorboard/dsk33B_compile"
 elif [ -v PERF_TEST ] && [ $PERF_TEST -gt 0 ]; then
     max_steps=100
-    tb_dir="/home/ubuntu/dev/tp_pp_dsk_nxd/shared/tensorboard/dsk33B_${JOB_ID}"
+    tb_dir="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp/shared/tensorboard/dsk33B_${JOB_ID}"
     mkdir -p $tb_dir
 else
     max_steps=30000
-    tb_dir="/home/ubuntu/dev/tp_pp_dsk_nxd/shared/tensorboard/dsk33B_${JOB_ID}"
+    tb_dir="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp/shared/tensorboard/dsk33B_${JOB_ID}"
     mkdir -p $tb_dir
 fi
 
@@ -93,6 +96,8 @@ torchrun $DISTRIBUTED_ARGS tp_pp_dsk_run.py \
     --pipeline_parallel_size $PP_DEGREE \
     --tensor_parallel_size $TP_DEGREE \
     --num_microbatches $NUM_MICROBATCHES \
+    --pretrained_weight 1 \
+    --checkpoint_dir $PRETRAINED_WEIGHT \
     --lr 0.00015 \
     --min_lr 1e-05 \
     --beta1 0.9 \
