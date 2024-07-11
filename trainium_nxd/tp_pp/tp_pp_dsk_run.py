@@ -20,11 +20,13 @@ import math
 import os
 import random
 import time
+import tqdm
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.parallel_loader as pl
 import torch_xla.distributed.xla_multiprocessing as xmp
 import transformers.modeling_utils as modeling_utils
 from transformers import LlamaConfig
@@ -80,29 +82,16 @@ from neuronx_distributed.utils.adamw_fp32_optim_params import AdamW_FP32OptimPar
 Metric = namedtuple("Metric", ["name", "value", "units", "additional_data"])
 
 
-def train_llama(args):
+def is_flag_true(flag):
+    return flag not in (None, 0, False, "", '0', 'false', 'False')
+
+
+def train_dsk(args):
     if dist.get_rank() == 0:
         print(f"args {args}")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
-
-    # Set up Llama config
-    config = LlamaConfig.from_pretrained(args.training_config)
-    config.use_cache = False
-    config.return_dict = False
-    config.sequence_parallel_enabled = args.use_sequence_parallel > 0
-    config.qkv_linear = args.qkv_linear > 0
-    config.selective_checkpoint_enabled = args.use_selective_checkpoint > 0
-    config.kv_shared_group_size = args.kv_replicator
-    config.max_position_embeddings = max(config.max_position_embeddings, args.seq_len)
-    if args.num_layer != -1:
-        config.num_hidden_layers = args.num_layer
-    if args.hidden_size != -1:
-        config.hidden_size = args.hidden_size
-    config.move_model_to_device = False
-
-    xm.master_print(f"{'*-' * 100}\nMODEL CONFIG: {config}", flush=True)
 
     # Create model with different options
     # Either deferred_init or meta device initialization will be required to avoid host OOM for 70B model
@@ -139,8 +128,26 @@ def train_llama(args):
         model_init_config=model_init_config,
     )
 
-    def get_model(config):
-        xm.master_print(f"{'DEBUG '*10}:::::::: get_model started", flush=True)
+    def get_model(args):
+        # Set up Llama config
+        config = LlamaConfig.from_pretrained(args.model_path)
+        config.use_cache = False
+        config.return_dict = False
+        config.sequence_parallel_enabled = args.use_sequence_parallel > 0
+        config.qkv_linear = args.qkv_linear > 0
+        config.selective_checkpoint_enabled = args.use_selective_checkpoint > 0
+        config.kv_shared_group_size = args.kv_replicator
+        config.pad_token_id = args.ignore_index if args.ignore_index != -100 else 0
+        config.ignore_index = args.ignore_index
+        config.max_position_embeddings = max(config.max_position_embeddings, args.seq_len)
+        if args.num_layer != -1:
+            config.num_hidden_layers = args.num_layer
+        if args.hidden_size != -1:
+            config.hidden_size = args.hidden_size
+        config.move_model_to_device = False
+        config.pad_token_id = args.ignore_index if args.ignore_index != -100 else 0
+        config.ignore_index = args.ignore_index
+        xm.master_print(f"Model config: {config}", flush=True)
         if args.use_deferred_init > 0 and deferred_init is not None:
             model = deferred_init.deferred_init(LlamaForCausalLM, config)
         else:
@@ -148,7 +155,6 @@ def train_llama(args):
         # Here we make sure we use the same sine and cosine matrices for all layers.
         # Making use of same tensors would make the CSE algorithm eliminate the lookup call
         # from layers, keeping only lookup from first layer.
-        xm.master_print(f"{'DEBUG '*10}:::::::: [model =] ready", flush=True)
         with torch.no_grad():
             cos, sin = get_sin_cos_matrix(config)
             for layer in model.model.layers:
@@ -160,11 +166,12 @@ def train_llama(args):
             print(f"model config {config}")
         return model
 
-    xm.master_print(f"{'DEBUG '*10}:::::::: Create NxD Model starting", flush=True)
     # Create NxD model
-    model = nxd.initialize_parallel_model(nxd_config, get_model, config)
+    model = nxd.initialize_parallel_model(nxd_config, get_model, args)
     world_size = parallel_state.get_data_parallel_size()
     # model_dtype = get_dtype(model)
+
+    device = xm.xla_device()
 
     param_groups = get_param_groups_by_weight_decay(model)
 
@@ -191,6 +198,22 @@ def train_llama(args):
         parallel_state.get_data_parallel_rank(),
         args.seed,
     )
+
+    # train_device_loader = pl.MpDeviceLoader(train_dataloader, device)
+    train_device_loader = train_dataloader
+
+    if is_flag_true(args.do_eval):
+        eval_dataloader, _ = create_dsk_pretraining_dataset(
+            args.eval_data_dir,
+            args.train_batch_size,
+            parallel_state.get_data_parallel_size(),
+            parallel_state.get_data_parallel_rank(),
+            args.seed,
+        )
+        # eval_device_loader = pl.MpDeviceLoader(eval_dataloader, device)
+        eval_device_loader = eval_dataloader
+    else:
+        eval_device_loader = None
 
 
 
@@ -246,11 +269,11 @@ def train_llama(args):
     print("--------TRAINING CONFIG----------")
     print(args)
     print("--------MODEL CONFIG----------")
-    print(config)
+    print(model.config)
     print("---------------------------------")
     # "Model configuration": config,
     param_contents = {
-        "Model": config.model_type,
+        "Model": model.config.model_type,
         "World size": xm.xrt_world_size(),
         "Data parallel degree": world_size,
         "Batch size": args.train_batch_size,
@@ -265,12 +288,39 @@ def train_llama(args):
         #     if variable.startswith("NEURON") or variable.startswith("XLA")
         # }
     }
+
+    def _evaluation_loop():  # start with the build in parallel entropy
+                    xm.master_print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
+
+                    model.eval()
+                    eval_loss = 0
+                    steps = 0
+                    for data in tqdm.tqdm(eval_dataloader, desc='Evaluation batches', disable=(not should_print)):
+                        input_ids = data["input_ids"]
+                        attention_mask = torch.ones((input_ids.shape))
+                        labels = data["labels"]
+                        # model() is not supported with PP, need to call run_eval instead
+                        loss = model.run_eval(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels,
+                        )
+                        detached_loss = loss.detach()
+                        eval_loss += detached_loss
+                        steps += 1
+                        xm.mark_step()
+                        # print(f"DEBUG: eval loss value: {detached_loss}")
+
+                    model.train()
+                    xm.master_print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
+
     if should_print:
         metric_writer.store_parameters(param_contents)
     while True:
         if torch.distributed.get_rank() == 0:
             print(f"Epoch {epoch}")
-        for batch_idx, batch in enumerate(train_dataloader):
+        # for batch_idx, batch in enumerate(train_dataloader):
+        for batch_idx, batch in enumerate(tqdm.tqdm(train_device_loader, desc='Batches', disable=(not should_print))):
             if resume_batch_idx is not None and batch_idx <= resume_batch_idx:
                 if torch.distributed.get_rank() == 0:
                     print(f"skipping batch {batch_idx}")
@@ -283,11 +333,18 @@ def train_llama(args):
             # Enavle auto-mix-precision if needed
             with torch.autocast(enabled=args.use_amp > 0, dtype=torch.bfloat16, device_type="cuda"):
                 # Calling model.run_train instead of model forward to use the PP runtime
+                # if should_print:
+                #     print("DEBUG INFO IN THE TRAINING LOOP")
+                #     print(f"{input_ids.shape=}, {labels.shape=}, {attention_mask.shape=}")
+                #     print(f"inputs 10: {input_ids[:10]}")
+                #     print(f"labels 10: {labels[:10]}")
                 loss = model.run_train(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels,
                 )
+                # if should_print:
+                #     print(f"DEBUG Loss: {loss} ({type(loss)=})")
             total_steps += 1
             optimizer.step()
             global_norm = optimizer.grad_norm  # Global norm before clipping
@@ -308,6 +365,11 @@ def train_llama(args):
                         ),
                     )
             xm.mark_step()
+
+            # Evaluation
+            if is_flag_true(args.do_eval) and (total_steps % args.eval_steps == 0):
+                xm.add_step_closure(_evaluation_loop)
+
             # Saving checkpoints
             if (args.checkpoint_freq > 0) and (total_steps % args.checkpoint_freq == 0):
                 nxd.save_checkpoint(
@@ -367,7 +429,7 @@ def train_llama(args):
 
 
 def _mp_fn(index, args):
-    train_llama(args)
+    train_dsk(args)
     xm.rendezvous("_mp_fn finished")
 
 
@@ -380,9 +442,13 @@ if __name__ == "__main__":
     parser.add_argument("--train_batch_size", type=int, default=16, help="batch size")
     parser.add_argument("--pipeline_parallel_size", type=int, default=1, help="PP size")
     parser.add_argument("--kv_replicator", type=int, default=1, help="KV replication size")
+    parser.add_argument("--ignore_index", type=int, default=-100, help="Ignore index for cross entropy loss")
     parser.add_argument("--seq_len", type=int, default=4096, help="PP size")
     parser.add_argument("--training_dir", type=str, default=None)
-    parser.add_argument("--training_config", type=str, default=None)
+    parser.add_argument("--do_eval", type=int, default=False, help="Perform evaluation too.")
+    parser.add_argument("--eval_data_dir", type=str, help="Pre-tokenized evaluation dataset directory.")
+    parser.add_argument("--eval_steps", type=int, help="Perform evaluation each eval_steps steps.")
+    parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--trace_file_path", type=str, default=None)
     parser.add_argument("--tb_dir", type=str, default="")
     parser.add_argument("--max_steps", type=int, default=100, help="max steps")

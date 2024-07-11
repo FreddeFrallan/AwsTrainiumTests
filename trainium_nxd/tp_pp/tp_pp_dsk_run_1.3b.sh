@@ -1,8 +1,8 @@
 #!/bin/bash
 set -ex
 
-# run: sbatch --exclusive --nodes 2 --cpus-per-task 128 --wrap="srun neuron_parallel_compile bash $(pwd)/tp_pp_dsk_run.sh"
-# later: sbatch --exclusive --nodes 2 --cpus-per-task 128 --wrap="srun bash $(pwd)/tp_pp_dsk_run.sh"
+# run: sbatch --exclusive --nodes 1 --cpus-per-task 128 --wrap="srun neuron_parallel_compile bash $(pwd)/tp_pp_dsk_run_1.3b.sh"
+# later: sbatch --exclusive --nodes 1 --cpus-per-task 128 --wrap="srun bash $(pwd)/tp_pp_dsk_run_1.3b.sh"
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 sudo sysctl -w net.ipv4.ip_local_reserved_ports=44000
@@ -17,8 +17,8 @@ export MALLOC_ARENA_MAX=128
 export XLA_DOWNCAST_BF16=1
 export NEURON_CC_FLAGS="--model-type=transformer --distribution-strategy=llm-training --cache_dir=$HOME/cache_dir_neuron/ --retry_failed_compilation"
 
-PROCESSES_PER_NODE=32
-WORLD_SIZE=2
+PROCESSES_PER_NODE=4
+WORLD_SIZE=1
 NODEID=0
 HOSTNAME=`hostname`
 if [ -v SLURM_NTASKS ]; then
@@ -48,18 +48,18 @@ echo "Nodeinfo NODEID $NODEID hostname $HOSTNAME"
 echo $DISTRIBUTED_ARGS
 
 SCRIPT_DIR="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp"
-PRETRAINED_WEIGHT="/home/ubuntu/dsk33b/pp8_tp8"
+PRETRAINED_WEIGHT="/home/ubuntu/dsk1.3b/pp2_tp2/"
 
-MODEL_PATH="deepseek-ai/deepseek-coder-33b-base"
+MODEL_PATH="deepseek-ai/deepseek-coder-1.3b-base"
 
 # Global batch size
 : ${GBS:=8}
 # Input sequence length
 SEQ_LEN=512
 # Pipeline parallel degree
-PP_DEGREE=8
+PP_DEGREE=2
 # Tensor parallel degree
-TP_DEGREE=8
+TP_DEGREE=2
 # Data paralell size
 DP=$(($PROCESSES_PER_NODE * $WORLD_SIZE / $TP_DEGREE / $PP_DEGREE))
 # Batch size per model replica

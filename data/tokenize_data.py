@@ -71,6 +71,7 @@ def parse_args():
     parser.add_argument('--seq_length', type=int, default=3*512, help='Tokenized sample length')
     parser.add_argument('--max_dump_size', type=int, default=10000, help='Maximum number of samples per dump')
     parser.add_argument('--pad_token', type=int, default=32014, help='Pad token ID')
+    parser.add_argument('--starting_character', type=int, default=0, help='Start data idx, use to create datasets from diferent parts of the data')
     parser.add_argument('--chars_to_tokenize', type=int, default=100000000, help='How many characters to tokenize from the input file')
     parser.add_argument('--chunk_size', type=int, default=10000000, help='To chunk the input file so that it fits in memory for tokenization')
 
@@ -95,7 +96,7 @@ if __name__ == '__main__':
     print(f"Loaded raw code, no. characters: {len(raw_code)/1e6} M")
 
     chunk_and_tokenize(
-        data=raw_code[:args.chars_to_tokenize],
+        data=raw_code[args.starting_character : args.starting_character + args.chars_to_tokenize],
         tokenizer=tokenizer,
         pad_token=args.pad_token,
         seq_length=args.seq_length,

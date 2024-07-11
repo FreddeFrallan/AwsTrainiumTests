@@ -11,7 +11,9 @@ pip install transformers==4.31.0 tensorboard datasets
 
 # aws sso login
 
-aws s3 cp --recursive s3://ekrakma/pp8_tp8/ pp8_tp8    # dsk33b-base model sharded for pp8 tp8
+# aws s3 cp --recursive s3://ekrakma/deepseek-coder/deepseek-coder-33b-base/pp8_tp8/ /home/ubuntu/dsk33b/pp8_tp8  # dsk33b-base model sharded for pp8 tp8
+
+# aws s3 cp --recursive s3://ekrakma/deepseek-coder/deepseek-coder-1.3b-base/pp2_tp2/ /home/ubuntu/dsk1.3b/pp2_tp2
 
 # copy or generate the data!
 

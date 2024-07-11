@@ -37,6 +37,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 from neuronx_distributed.parallel_layers.layers import ParallelEmbedding, ColumnParallelLinear, RowParallelLinear
 from neuronx_distributed.parallel_layers.loss_functions import parallel_cross_entropy
+# from loss_functions_custom import parallel_cross_entropy
 from neuronx_distributed.parallel_layers.parallel_state import get_tensor_model_parallel_size, get_tensor_model_parallel_rank
 import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
 from neuronx_distributed.utils.model_utils import move_model_to_device
@@ -227,6 +228,7 @@ class LlamaAttention(LlamaAttentionHF):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.pretraining_tp = config.pretraining_tp
         self.max_position_embeddings = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
 
         if not hasattr(config, "kv_shared_group_size"):
             config.kv_shared_group_size = 1
@@ -601,11 +603,10 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
 
     def __init__(self, config):
         LlamaPreTrainedModel.__init__(self, config)
-        xm.master_print("DEBUG: init [1]")
         self.model = LlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
-        xm.master_print("DEBUG: init [2]")
+        self.ignore_index = config.ignore_index if 'ignore_index' in config.__dict__ else -1
 
         init_method = partial(_init_normal, config.initializer_range)
         self.lm_head = ColumnParallelLinear(
@@ -615,7 +616,6 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
             gather_output=False,
             init_method=init_method,
         )
-        xm.master_print("DEBUG: init [3]")
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -689,6 +689,8 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
 
         logits = logits.double()
 
+        # print(f"DEBUG modelling llama forward {labels.shape=}, {len(outputs)=}, {outputs[:10]=}")
+
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -702,8 +704,11 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
+            # loss = loss_fct(shift_logits, shift_labels, ignore_index=self.ignore_index)
 
             loss = torch.mean(loss)
+
+        # print(f"DEBUG modelling llama {loss}, {type(loss)=}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]

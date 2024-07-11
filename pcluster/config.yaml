@@ -4,10 +4,11 @@ Image:
 HeadNode:
   InstanceType: c5.4xlarge
   Networking:
-    SubnetId: subnet-abc1
+    SubnetId: subnet-01edbfe05fe11c37e
     AdditionalSecurityGroups:
       - sg-0b750eab4da7c683e
       - sg-010bb85aaa30979a8
+      - sg-096c2f4bc53f9c9d4
   Ssh:
     KeyName: ekrakma
   LocalStorage:
@@ -47,7 +48,11 @@ Scheduling:
           Name: queue1-i1
       Networking:
         SubnetIds:
-          - subnet-abc1 # NOTE: same private subnet as the head node!
+          - subnet-01edbfe05fe11c37e
+        SecurityGroups:
+          - sg-0b750eab4da7c683e
+          - sg-010bb85aaa30979a8
+          - sg-096c2f4bc53f9c9d4
         PlacementGroup:
           Enabled: true
       CustomActions:
@@ -57,6 +62,10 @@ Scheduling:
         S3Access:
           - BucketName: neuron-s3
             EnableWriteAccess: false
+        AdditionalIamPolicies: # grant ECR, SSM and S3 read access
+          - Policy: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+          - Policy: arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+          - Policy: arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 SharedStorage:
 - FsxLustreSettings:
     DeploymentType: SCRATCH_2

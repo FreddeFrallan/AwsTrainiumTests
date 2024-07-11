@@ -59,4 +59,10 @@ Out[3]: 27290
 In [4]: ptd[0]["input_ids"].shape
 Out[4]: torch.Size([1536])
 ```
+
+## Validation data
+
+In order to generate validation data, use **starting_character** switch to start from some index beyond the **hars_to_tokenize** scope of the trainig data. Example:
+
+`python3 tokenize_data.py --data_file train-00000-of-00257.parquet --tokenization_folder validation_512 --seq_length 512 --starting_character 100000000 --chars_to_tokenize 2000000`
  
