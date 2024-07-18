@@ -36,8 +36,11 @@ from transformers.utils import add_start_docstrings, add_start_docstrings_to_mod
 from transformers.models.llama.configuration_llama import LlamaConfig
 
 from neuronx_distributed.parallel_layers.layers import ParallelEmbedding, ColumnParallelLinear, RowParallelLinear
-# from neuronx_distributed.parallel_layers.loss_functions import parallel_cross_entropy
-from loss_functions_custom import parallel_cross_entropy
+from neuronx_distributed.parallel_layers.loss_functions import parallel_cross_entropy as pce_normal
+from neuronx_distributed.parallel_layers.loss_functions_test import parallel_cross_entropy
+from torch.nn import CrossEntropyLoss
+# from loss_functions_custom import parallel_cross_entropy
+# from loss_functions_test import parallel_cross_entropy
 from neuronx_distributed.parallel_layers.parallel_state import get_tensor_model_parallel_size, get_tensor_model_parallel_rank
 import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
 from neuronx_distributed.utils.model_utils import move_model_to_device
@@ -64,6 +67,36 @@ from transformers.models.llama.modeling_llama import (
     LLAMA_START_DOCSTRING,
     LLAMA_INPUTS_DOCSTRING,
 )
+
+
+def test_pce_function():
+    import torch_xla.core.xla_model
+    device = xm.xla_device()
+    loss_troch = CrossEntropyLoss(reduction='none')
+    loss_troch_ignore = CrossEntropyLoss(ignore_index=100, reduction='none')
+    pce_default = pce_normal
+    pce_custom = parallel_cross_entropy
+    # inputs = torch.randn(1, 5, requires_grad=True) # batch , classes
+    inputs = torch.tensor([
+        [0, 0, 0, 0, 1], # perfect prediction for idx 4
+        [0.2, 0.2, 0.2, 0.2, 0.2], # random probability for each class
+        [1, 1, 1, 1, 1], # random again, but higher values which should not matter
+        [1, 1, 1, 1, 1], # random again, but different target values which should not matter
+        [-10, -100, -200, -1500, 10000], # much higher value for the actual class
+        [-10, -5, 0, 5, 10] # just some values, but wrong prediction this time
+    ])
+    targets = torch.tensor([4, 3, 3, 1, 4, 2], dtype=torch.long) # batch size
+    targets_ignore = torch.tensor([4, 3, 3, 100, 100, 2], dtype=torch.long) # batch size
+    print(f"Input values shape: {inputs.shape}, {inputs=}")
+    print(f"Output values: {targets}")
+    print(f"Output values + ignore: {targets_ignore}")
+    print("*" * 100)
+    print(f"Loss value for Torch:          {loss_troch(inputs, targets)}")
+    print(f"Loss value for default NxD:    {pce_default(inputs.to(device), targets.to(device))}")
+    # print(f"Loss value for Torch + ignore: {loss_troch_ignore(input, targets_ignore)}")
+    print(f"Loss value for custom NxD:     {pce_custom(inputs.to(device), targets_ignore.to(device), ignore_index=100)}")
+    print("*" * 100)
+
 
 from functools import partial
 def _init_normal(std, w):
@@ -606,7 +639,7 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
         self.model = LlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
-        self.ignore_index = config.ignore_index
+        self.ignore_index = config.ignore_index if 'ignore_index' in config.__dict__ else -1
 
         init_method = partial(_init_normal, config.initializer_range)
         self.lm_head = ColumnParallelLinear(
@@ -689,6 +722,8 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
 
         logits = logits.double()
 
+        # print(f"DEBUG modelling llama forward {labels.shape=}, {len(outputs)=}, {outputs[:10]=}")
+
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
@@ -705,6 +740,8 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
             loss = loss_fct(shift_logits, shift_labels, ignore_index=self.ignore_index)
 
             loss = torch.mean(loss)
+
+        # print(f"DEBUG modelling llama {loss}, {type(loss)=}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]

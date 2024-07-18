@@ -73,9 +73,9 @@ IGNORE_INDEX=32018
 # DATA_PATH="$HOME/examples_datasets/wikicorpus_llama2_7B_tokenized_4k"
 DATA_PATH="/home/ubuntu/data_512"
 
-DO_EVAL=0
+DO_EVAL=1
 EVAL_DATA_PATH="/home/ubuntu/validation_512" # eval_data_dir
-EVAL_STEPS=10 # global steps, not microsteps
+EVAL_STEPS=100 # global steps, not microsteps
 
 
 if [ "$NEURON_EXTRACT_GRAPHS_ONLY" = "1" ]; then

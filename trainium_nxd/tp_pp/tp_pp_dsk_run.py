@@ -62,6 +62,7 @@ from modeling_llama_nxd import (
     LlamaForCausalLM,
     LlamaRMSNorm,
     init_weights,
+    test_pce_function
 )
 
 from training_utils import (
@@ -290,10 +291,11 @@ def train_dsk(args):
     }
 
     def _evaluation_loop():  # start with the build in parallel entropy
-                    xm.master_print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
-
+                    # xm.master_print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
+                    if should_print:
+                        print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
                     model.eval()
-                    eval_loss = 0
+                    eval_loss = 0.0
                     steps = 0
                     for data in tqdm.tqdm(eval_dataloader, desc='Evaluation batches', disable=(not should_print)):
                         input_ids = data["input_ids"]
@@ -305,17 +307,21 @@ def train_dsk(args):
                             attention_mask=attention_mask,
                             labels=labels,
                         )
-                        detached_loss = loss.detach()
-                        eval_loss += detached_loss
+                        if should_print:
+                            detached_loss = loss.detach().item()
+                            eval_loss += detached_loss
+                            # print(f"DEBUG EVAL: {pp_rank=}, {dp_rank=}, {tp_rank=}, {loss=}")
+                            # print(f"DEBUG: current eval loss value: {eval_loss} (steps={steps})")
                         steps += 1
                         xm.mark_step()
-                        # print(f"DEBUG: eval loss value: {detached_loss}")
-
                     model.train()
-                    xm.master_print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
+                    if should_print:
+                        print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
 
     if should_print:
         metric_writer.store_parameters(param_contents)
+    # test_pce_function()
+    # return
     while True:
         if torch.distributed.get_rank() == 0:
             print(f"Epoch {epoch}")
