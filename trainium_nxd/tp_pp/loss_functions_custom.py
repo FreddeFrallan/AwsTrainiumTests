@@ -42,7 +42,7 @@ class _ParallelCrossEntropy(torch.autograd.Function):
         # masked_target = target.clone() - vocab_start_index
         # masked_target[target_mask] = 0
         # new xla friendly
-        target_mask = (target >= vocab_start_index) & (target < vocab_end_index) & (target == ignore_index)
+        target_mask = (target >= vocab_start_index) & (target < vocab_end_index) & (target != ignore_index)
         masked_target = target.clone() - vocab_start_index
         masked_target = torch.mul(masked_target, target_mask.long())
 
