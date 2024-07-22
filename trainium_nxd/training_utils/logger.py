@@ -25,7 +25,8 @@ class Logger:
     def log(self, total_steps, loss, global_norm, current_lr, input_ids, throughput, start):
         end = time.time()
         iteration_time = end - start
-        tps = throughput.get_throughput()
+        # tps = throughput.get_throughput()
+        tps = throughput
         print(
             f"step {total_steps} step_time {iteration_time}s throughput {tps} seq/s loss {loss.detach().cpu().item()} grad norm {global_norm.item() if global_norm is not None else None}"
         )

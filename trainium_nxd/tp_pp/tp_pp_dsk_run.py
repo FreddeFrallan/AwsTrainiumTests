@@ -18,6 +18,7 @@
 import argparse
 import math
 import os
+import sys
 import random
 import time
 import tqdm
@@ -55,8 +56,12 @@ except ImportError:
 
 from collections import namedtuple
 
-from logger import Logger
-from modeling_llama_nxd import (
+EXTRA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# print(f"Adding {EXTRA_PATH} to the sys path...")
+sys.path.append(EXTRA_PATH)
+
+from trainium_nxd.training_utils.logger import Logger
+from trainium_nxd.training_utils.modeling_llama_nxd import (
     CoreAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
@@ -65,7 +70,7 @@ from modeling_llama_nxd import (
     test_pce_function
 )
 
-from training_utils import (
+from trainium_nxd.training_utils.training_utils import (
     Throughput,
     TrainingMetrics,
     create_llama_pretraining_dataset,
@@ -291,32 +296,31 @@ def train_dsk(args):
     }
 
     def _evaluation_loop():  # start with the build in parallel entropy
-                    # xm.master_print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
-                    if should_print:
-                        print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
-                    model.eval()
-                    eval_loss = 0.0
-                    steps = 0
-                    for data in tqdm.tqdm(eval_dataloader, desc='Evaluation batches', disable=(not should_print)):
-                        input_ids = data["input_ids"]
-                        attention_mask = torch.ones((input_ids.shape))
-                        labels = data["labels"]
-                        # model() is not supported with PP, need to call run_eval instead
-                        loss = model.run_eval(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            labels=labels,
-                        )
-                        if should_print:
-                            detached_loss = loss.detach().item()
-                            eval_loss += detached_loss
-                            # print(f"DEBUG EVAL: {pp_rank=}, {dp_rank=}, {tp_rank=}, {loss=}")
-                            # print(f"DEBUG: current eval loss value: {eval_loss} (steps={steps})")
-                        steps += 1
-                        xm.mark_step()
-                    model.train()
-                    if should_print:
-                        print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
+        if should_print:
+            print(f"{'-' * 20}\nRUNNING EVALUATION (GLOBAL STEP = {total_steps})", flush=True)
+        model.eval()
+        eval_loss = 0.0
+        steps = 0
+        for data in tqdm.tqdm(eval_dataloader, desc='Evaluation batches', disable=(not should_print)):
+            input_ids = data["input_ids"]
+            attention_mask = torch.ones((input_ids.shape))
+            labels = data["labels"]
+            # model() is not supported with PP, need to call run_eval instead
+            loss = model.run_eval(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            if should_print:
+                detached_loss = loss.detach().item()
+                eval_loss += detached_loss
+                # print(f"DEBUG EVAL: {pp_rank=}, {dp_rank=}, {tp_rank=}, {loss=}")
+                # print(f"DEBUG: current eval loss value: {eval_loss} (steps={steps})")
+            steps += 1
+            xm.mark_step()
+        model.train()
+        if should_print:
+            print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
 
     if should_print:
         metric_writer.store_parameters(param_contents)
@@ -356,20 +360,20 @@ def train_dsk(args):
             global_norm = optimizer.grad_norm  # Global norm before clipping
             optimizer.zero_grad()
             lr_scheduler.step()
-            if should_print:
-                if total_steps % args.logging_interval == 0:
-                    xm.add_step_closure(
-                        logger.log,
-                        (
-                            total_steps,
-                            loss.detach(),
-                            global_norm,
-                            lr_scheduler.get_lr()[0],
-                            input_ids.detach(),
-                            throughput,
-                            start,
-                        ),
-                    )
+            if should_print and total_steps % args.logging_interval == 0:
+                xm.add_step_closure(
+                    logger.log,
+                    (
+                        total_steps,
+                        loss.detach(),
+                        global_norm,
+                        # lr_scheduler.get_lr()[0],
+                        lr_scheduler.get_last_lr()[0],
+                        input_ids.detach(),
+                        throughput.get_value(),
+                        start,
+                    ),
+                )
             xm.mark_step()
 
             # Evaluation
@@ -509,7 +513,7 @@ if __name__ == "__main__":
         default=None,
         help="Minumum value for learning rate. The scheduler" "clip values below this threshold.",
     )
-    lr_grp.add_argument("--logging_interval", type=int, default=1, help="number of warmup_steps")
+    lr_grp.add_argument("--logging_interval", type=int, default=10, help="number of warmup_steps")
 
     args, _ = parser.parse_known_args()
     # Workaround for NaNs seen with transformers version >= 4.21.0

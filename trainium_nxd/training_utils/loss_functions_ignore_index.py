@@ -4,7 +4,6 @@
 # and add it to this init file:
 # <python packages>site-packages/neuronx_distributed/parallel_layers/__init__.py
 
-
 import torch
 
 from .parallel_state import (
@@ -30,7 +29,6 @@ class _ParallelCrossEntropy(torch.autograd.Function):
         # Subtract the maximum value.
         vocab_parallel_logits.sub_(logits_max.unsqueeze(dim=-1))
 
-
         # Get the partition's vocab indecies
         get_vocab_range = EmbeddingUtility.range_from_per_partition_vocab_size
         partition_vocab_size = vocab_parallel_logits.size()[-1]
@@ -42,7 +40,7 @@ class _ParallelCrossEntropy(torch.autograd.Function):
         # masked_target = target.clone() - vocab_start_index
         # masked_target[target_mask] = 0
         # new xla friendly
-        target_mask = (target >= vocab_start_index) & (target < vocab_end_index) & (target == ignore_index)
+        target_mask = (target >= vocab_start_index) & (target < vocab_end_index) & (target != ignore_index)
         masked_target = target.clone() - vocab_start_index
         masked_target = torch.mul(masked_target, target_mask.long())
 
@@ -72,7 +70,7 @@ class _ParallelCrossEntropy(torch.autograd.Function):
         # torch.exp(vocab_parallel_logits, out=exp_logits)
         exp_logits = torch.exp(vocab_parallel_logits)
 
-        # Ignore ignore_index for 
+        # Ignore ignore_index for
         mask_ignore_index = (target != ignore_index).float()
         exp_logits.mul_(mask_ignore_index.view(-1, 1))
 
@@ -88,7 +86,7 @@ class _ParallelCrossEntropy(torch.autograd.Function):
         loss.mul_(mask_ignore_index)
 
         # Store softmax, target-mask and masked-target for backward pass.
-        exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1) + 1e-8) # to prevent division by 0 for ignore_index
+        exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1) + 1e-8)  # to prevent division by 0 for ignore_index
 
         vocab_size = exp_logits.size(-1)
 
@@ -121,4 +119,5 @@ class _ParallelCrossEntropy(torch.autograd.Function):
 
 def parallel_cross_entropy(vocab_parallel_logits, target, ignore_index=-100):
     """Helper function for the cross entropy."""
+    # print(f"DEBUG APPLY IGNORE: {vocab_parallel_logits =}, {target=}, {ignore_index=}")
     return _ParallelCrossEntropy.apply(vocab_parallel_logits, target, ignore_index)

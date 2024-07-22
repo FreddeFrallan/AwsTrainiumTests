@@ -5,15 +5,6 @@
 
 # No optimum.neuron is required, only transformers and neuronx_distributed
 
-# TODO:
-# [0] Improve input parsing
-# [x] Add evaluation
-# [ ] Load model with pretrained weights
-# [ ] Test checkpointing mechanism
-# [ ] Add ignore_index for parallel_cross_entropy
-# [x] Investigate batch>1 error
-
-# from torch.nn import CrossEntropyLoss
 
 
 import transformers.modeling_utils as modeling_utils
@@ -28,14 +19,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 import tqdm
 
+EXTRA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# print(f"Adding {EXTRA_PATH} to the sys path...")
+sys.path.append(EXTRA_PATH)
+
 import torch
 import torch.distributed as dist
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
 import torch_xla.distributed.xla_multiprocessing as xmp
-from logger import Logger
-from modeling_llama_nxd import CoreAttention, LlamaForCausalLM
-from training_utils import Throughput, MFU, TrainingMetrics, Metric, create_dsk_pretraining_dataset
+from trainium_nxd.training_utils.logger import Logger
+from trainium_nxd.training_utils.modeling_llama_nxd import CoreAttention, LlamaForCausalLM
+from trainium_nxd.training_utils import Throughput, MFU, TrainingMetrics, Metric, create_dsk_pretraining_dataset
 from transformers import AdamW, LlamaConfig, set_seed
 from transformers.optimization import get_linear_schedule_with_warmup
 

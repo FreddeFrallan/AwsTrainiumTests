@@ -53,7 +53,7 @@ PRETRAINED_WEIGHT="/home/ubuntu/dsk33b/pp8_tp8"
 MODEL_PATH="deepseek-ai/deepseek-coder-33b-base"
 
 # Global batch size
-: ${GBS:=8}
+: ${GBS:=32}
 # Input sequence length
 SEQ_LEN=512
 # Pipeline parallel degree
@@ -67,15 +67,16 @@ BS=$(($GBS / $DP))
 # Number microbatches for pipeline execution
 # Setting same as BS so each microbatch contains a single datasample
 NUM_MICROBATCHES=$BS
-IGNORE_INDEX=32018
+IGNORE_INDEX=32014
 
 
 # DATA_PATH="$HOME/examples_datasets/wikicorpus_llama2_7B_tokenized_4k"
-DATA_PATH="/home/ubuntu/data_512"
+# DATA_PATH="/home/ubuntu/data_512"
+DATA_PATH="/home/ubuntu/data_padding_512"
 
 DO_EVAL=1
 EVAL_DATA_PATH="/home/ubuntu/validation_512" # eval_data_dir
-EVAL_STEPS=100 # global steps, not microsteps
+EVAL_STEPS=250 # global steps, not microsteps
 
 
 if [ "$NEURON_EXTRACT_GRAPHS_ONLY" = "1" ]; then
@@ -86,7 +87,7 @@ elif [ -v PERF_TEST ] && [ $PERF_TEST -gt 0 ]; then
     tb_dir="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp/shared/tensorboard/dsk33B_${JOB_ID}"
     mkdir -p $tb_dir
 else
-    max_steps=30000
+    max_steps=5100
     tb_dir="/home/ubuntu/AwsTrainiumTests/trainium_nxd/tp_pp/shared/tensorboard/dsk33B_${JOB_ID}"
     mkdir -p $tb_dir
 fi
@@ -115,6 +116,7 @@ torchrun $DISTRIBUTED_ARGS tp_pp_dsk_run.py \
     --num_microbatches $NUM_MICROBATCHES \
     --pretrained_weight 1 \
     --checkpoint_dir $PRETRAINED_WEIGHT \
+    --checkpoint_freq 5000 \
     --lr 0.00015 \
     --min_lr 1e-05 \
     --beta1 0.9 \

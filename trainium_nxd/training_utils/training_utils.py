@@ -13,11 +13,10 @@ import torch
 from torch.utils.data import DistributedSampler
 from torch.utils.data.dataloader import DataLoader
 from transformers import default_data_collator, set_seed
-
-from pickle_dataset import PickledTrainerDataset
+from .pickle_dataset import PickledTrainerDataset
 
 try:
-    from lr import CosineAnnealing
+    from .lr import CosineAnnealing
 except ImportError:
     CosineAnnealing = None
 
@@ -25,6 +24,43 @@ from collections import namedtuple
 
 Metric = namedtuple("Metric", ["name", "value", "units", "additional_data"])
 remainder = {"input_ids": [], "attention_mask": [], "token_type_ids": []}
+
+
+# empty list to save remainder from batches to use in next batch
+def pack_dataset(dataset, chunk_length=2048):
+    print(f"Chunking dataset into chunks of {chunk_length} tokens.")
+
+    def chunk(sample, chunk_length=chunk_length):
+        # define global remainder variable to save remainder from batches to use in next batch
+        global remainder
+        # Concatenate all texts and add remainder from previous batch
+        concatenated_examples = {k: list(chain(*sample[k])) for k in sample.keys()}
+        concatenated_examples = {k: remainder[k] + concatenated_examples[k] for k in concatenated_examples.keys()}
+        # get total number of tokens for batch
+        batch_total_length = len(concatenated_examples[list(sample.keys())[0]])
+
+        # get max number of chunks for batch
+        if batch_total_length >= chunk_length:
+            batch_chunk_length = (batch_total_length // chunk_length) * chunk_length
+
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + chunk_length] for i in range(0, batch_chunk_length, chunk_length)]
+            for k, t in concatenated_examples.items()
+        }
+        # add remainder to global variable for next batch
+        remainder = {k: concatenated_examples[k][batch_chunk_length:] for k in concatenated_examples.keys()}
+        # prepare labels
+        result["labels"] = result["input_ids"].copy()
+        return result
+
+    # tokenize and chunk dataset
+    lm_dataset = dataset.map(
+        partial(chunk, chunk_length=chunk_length),
+        batched=True,
+    )
+    print(f"Total number of samples: {len(lm_dataset)}")
+    return lm_dataset
 
 
 def get_learning_rate_scheduler(optimizer, args, last_epoch=-1):
@@ -61,6 +97,38 @@ def get_param_groups_by_weight_decay(model):
     return optimizer_grouped_parameters
 
 
+def create_llama_pretraining_dataset(data_dir, mini_batch_size, dp_size, dp_rank, seed):
+    # Workaround because python functions are not picklable
+    class WorkerInitObj(object):
+        def __init__(self, seed):
+            self.seed = seed
+
+        def __call__(self, id):
+            set_seed(self.seed)
+
+    worker_init = WorkerInitObj(seed)
+    train_data = datasets.load_from_disk(data_dir)
+    train_sampler = DistributedSampler(
+        train_data,
+        num_replicas=dp_size,
+        rank=dp_rank,
+        shuffle=False,
+        drop_last=True,
+    )
+    train_dataloader = DataLoader(
+        train_data,
+        collate_fn=default_data_collator,
+        sampler=train_sampler,
+        batch_size=mini_batch_size,
+        num_workers=0,
+        worker_init_fn=worker_init,
+        drop_last=True,
+        pin_memory=True,
+    )
+    return train_dataloader, None
+
+
+
 def create_dsk_pretraining_dataset(data_dir, mini_batch_size, dp_size, dp_rank, seed):
     # Workaround because python functions are not picklable
     class WorkerInitObj(object):
@@ -92,6 +160,112 @@ def create_dsk_pretraining_dataset(data_dir, mini_batch_size, dp_size, dp_rank, 
         pin_memory=True,
     )
     return train_dataloader, None
+
+
+# def create_instruction_based_dataset(data_dir, mini_batch_size, dp_size, dp_rank, seed, tokenizer=None, task=None):
+#     raw_datasets = datasets.load_dataset(data_dir, split="train")
+#     if task:
+#         raw_datasets = raw_datasets.filter(lambda example: example["category"] == task)
+#     train_and_test_dataset = raw_datasets.train_test_split(test_size=8)
+#     train_dataset = train_and_test_dataset["train"]
+#     test_dataset = train_and_test_dataset["test"]
+
+#     def preprocess_train_dataset(sample):
+#         instruction = f"### Instruction\n{sample['instruction']}"
+#         context = f"### Context\n{sample['context']}" if len(sample["context"]) > 0 else None
+#         response = f"### Answer\n{sample['response']}"
+#         # join all the parts together
+#         prompt = "\n".join([i for i in [instruction, context, response] if i is not None])
+#         model_input = tokenizer(f"{prompt}{tokenizer.eos_token}")
+#         return model_input
+
+#     train_data = train_dataset.shuffle().map(preprocess_train_dataset, remove_columns=train_dataset.column_names)
+#     train_data = pack_dataset(train_data, chunk_length=2048)
+
+#     class WorkerInitObj(object):
+#         def __init__(self, seed):
+#             self.seed = seed
+
+#         def __call__(self, id):
+#             set_seed(self.seed)
+
+#     worker_init = WorkerInitObj(seed)
+
+#     train_sampler = DistributedSampler(
+#         train_data,
+#         num_replicas=dp_size,
+#         rank=dp_rank,
+#         shuffle=True,
+#         drop_last=True,
+#     )
+#     train_dataloader = DataLoader(
+#         train_data,
+#         collate_fn=default_data_collator,
+#         sampler=train_sampler,
+#         batch_size=mini_batch_size,
+#         num_workers=0,
+#         worker_init_fn=worker_init,
+#         drop_last=True,
+#         pin_memory=True,
+#     )
+
+#     def preprocess_test_dataset(sample):
+#         instruction = f"### Instruction\n{sample['instruction']}"
+#         context = f"### Context\n{sample['context']}" if len(sample["context"]) > 0 else None
+#         response = f"### Answer\n"
+#         # join all the parts together
+#         prompt = "\n".join([i for i in [instruction, context, response] if i is not None])
+#         model_input = tokenizer(prompt, add_special_tokens=False)
+#         labels = tokenizer(sample["response"], add_special_tokens=False)
+#         model_input["labels"] = labels["input_ids"]
+#         return model_input
+
+#     test_data = test_dataset.map(preprocess_test_dataset, remove_columns=test_dataset.column_names)
+
+#     test_sampler = DistributedSampler(
+#         test_data,
+#         num_replicas=dp_size,
+#         rank=dp_rank,
+#         shuffle=False,
+#         drop_last=False,
+#     )
+#     test_dataloader = DataLoader(
+#         test_data,
+#         collate_fn=default_data_collator,
+#         sampler=test_sampler,
+#         batch_size=mini_batch_size,
+#         num_workers=0,
+#         drop_last=False,
+#         pin_memory=True,
+#     )
+
+#     return train_dataloader, test_dataloader
+
+
+def create_partition(num_hidden_layers, pipeline_parallel_size):
+    """
+    Evenly split the transformer layers between the PP ranks
+    """
+    assert num_hidden_layers % pipeline_parallel_size == 0
+    num_layer_per_partition = num_hidden_layers // pipeline_parallel_size
+    pipeline_cuts = []
+    current_cut = num_layer_per_partition - 1
+    for i in range(pipeline_parallel_size - 1):
+        pipeline_cuts.append(f"model.layers.{current_cut}")
+        current_cut += num_layer_per_partition
+    return pipeline_cuts
+
+
+def get_sin_cos_matrix(config):
+    head_dim = config.hidden_size // config.num_attention_heads
+    base = 10000
+    inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    t = torch.arange(config.max_position_embeddings, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    # Different from paper, but it uses a different permutation in order to obtain the same calculation
+    emb = torch.cat((freqs, freqs), dim=-1)
+    return emb.cos()[None, None, :, :].to(torch.float32), emb.sin()[None, None, :, :].to(torch.float32)
+
 
 def get_dtype(model) -> str:
     """
@@ -232,28 +406,3 @@ class MFU(MovingAvgWindowMetirc):
     def compute_metric(self, window_size):
         tokens_per_second = window_size * self.tokens_per_iteration / self.window_time
         return self.model_FLOP * tokens_per_second / self.hw_FLOPS
-
-
-# class Throughput:
-#     def __init__(self, batch_size, world_size, grad_accum_usteps, moving_avg_window_size=10, logging_interval=1):
-#         """
-#         Used to calculate the throughput over a moving window. It records the step time
-#         between two calls and uses that time to calculate the throughput.
-#         """
-#         self.seqs_per_iteration = batch_size * world_size * grad_accum_usteps * logging_interval
-#         self.moving_avg_window_size = math.ceil(moving_avg_window_size / logging_interval)
-#         self.moving_avg_window = queue.Queue()
-#         self.window_time = 0
-#         self.start_time = time.time()
-
-#     def get_throughput(self):
-#         step_time = time.time() - self.start_time
-#         self.start_time += step_time
-#         self.window_time += step_time
-#         self.moving_avg_window.put(step_time)
-#         window_size = self.moving_avg_window.qsize()
-#         if window_size > self.moving_avg_window_size:
-#             self.window_time -= self.moving_avg_window.get()
-#             window_size -= 1
-#         throughput = window_size * self.seqs_per_iteration / self.window_time
-#         return throughput

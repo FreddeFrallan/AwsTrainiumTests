@@ -37,10 +37,8 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 
 from neuronx_distributed.parallel_layers.layers import ParallelEmbedding, ColumnParallelLinear, RowParallelLinear
 from neuronx_distributed.parallel_layers.loss_functions import parallel_cross_entropy as pce_normal
-from neuronx_distributed.parallel_layers.loss_functions_test import parallel_cross_entropy
+from neuronx_distributed.parallel_layers.loss_functions_ignore_index import parallel_cross_entropy
 from torch.nn import CrossEntropyLoss
-# from loss_functions_custom import parallel_cross_entropy
-# from loss_functions_test import parallel_cross_entropy
 from neuronx_distributed.parallel_layers.parallel_state import get_tensor_model_parallel_size, get_tensor_model_parallel_rank
 import neuronx_distributed.parallel_layers.utils as neuronx_dist_utils
 from neuronx_distributed.utils.model_utils import move_model_to_device
@@ -70,7 +68,6 @@ from transformers.models.llama.modeling_llama import (
 
 
 def test_pce_function():
-    import torch_xla.core.xla_model
     device = xm.xla_device()
     loss_troch = CrossEntropyLoss(reduction='none')
     loss_troch_ignore = CrossEntropyLoss(ignore_index=100, reduction='none')
@@ -85,6 +82,7 @@ def test_pce_function():
         [-10, -100, -200, -1500, 10000], # much higher value for the actual class
         [-10, -5, 0, 5, 10] # just some values, but wrong prediction this time
     ])
+    inputs_random = torch.randn(6, 5, requires_grad=True) # batch , classes
     targets = torch.tensor([4, 3, 3, 1, 4, 2], dtype=torch.long) # batch size
     targets_ignore = torch.tensor([4, 3, 3, 100, 100, 2], dtype=torch.long) # batch size
     print(f"Input values shape: {inputs.shape}, {inputs=}")
@@ -94,7 +92,15 @@ def test_pce_function():
     print(f"Loss value for Torch:          {loss_troch(inputs, targets)}")
     print(f"Loss value for default NxD:    {pce_default(inputs.to(device), targets.to(device))}")
     # print(f"Loss value for Torch + ignore: {loss_troch_ignore(input, targets_ignore)}")
-    print(f"Loss value for custom NxD:     {pce_custom(inputs.to(device), targets_ignore.to(device), ignore_index=100)}")
+    print(f"Loss value for custom NxD   (same_targets):     {pce_custom(inputs.to(device), targets.to(device), ignore_index=100)}")
+    print(f"Loss value for custom NxD (ignore_targets):     {pce_custom(inputs.to(device), targets_ignore.to(device), ignore_index=100)}")
+    
+    print(f"Loss value for Torch (RANDINP):       {loss_troch(inputs_random, targets)}")
+    print(f"Loss value for default NxD (RANDINP): {pce_default(inputs_random.to(device), targets.to(device))}")
+    print(f"Loss value for custom NxD (RANDINP) (same_targets):    {pce_custom(inputs_random.to(device), targets.to(device), ignore_index=100)}")
+    print(f"Loss value for custom NxD (RANDINP) (ignore_targets):  {pce_custom(inputs_random.to(device), targets_ignore.to(device), ignore_index=100)}")
+    
+    
     print("*" * 100)
 
 
@@ -731,6 +737,7 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
             shift_labels = labels[..., 1:].contiguous()
             # Flatten the tokens
             loss_fct = parallel_cross_entropy
+            # loss_fct = pce_normal
             shift_logits = shift_logits.view(-1, shift_logits.size(-1))
 
             shift_labels = shift_labels.view(-1)
@@ -740,8 +747,6 @@ class LlamaForCausalLM(LlamaForCausalLMHF):
             loss = loss_fct(shift_logits, shift_labels, ignore_index=self.ignore_index)
 
             loss = torch.mean(loss)
-
-        # print(f"DEBUG modelling llama {loss}, {type(loss)=}")
 
         if not return_dict:
             output = (logits,) + outputs[1:]
