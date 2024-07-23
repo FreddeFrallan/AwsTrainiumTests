@@ -17,8 +17,8 @@ export MALLOC_ARENA_MAX=128
 export XLA_DOWNCAST_BF16=1
 export NEURON_CC_FLAGS="--model-type=transformer --distribution-strategy=llm-training --cache_dir=$HOME/cache_dir_neuron/ --retry_failed_compilation"
 
-PROCESSES_PER_NODE=32
-WORLD_SIZE=2
+PROCESSES_PER_NODE=32 # How many neuron cores to use
+WORLD_SIZE=2    # How many trainium nodes to use
 NODEID=0
 HOSTNAME=`hostname`
 if [ -v SLURM_NTASKS ]; then
@@ -92,13 +92,9 @@ else
     mkdir -p $tb_dir
 fi
 
-# EXTRA_ARGS=" \ "
-# if [ $DO_EVAL -gt 0 ]; then
-#     EXTRA_ARGS+=" --do_eval"
-
-
-    # --pretrained_weight 1 \
-    # --checkpoint_dir $PRETRAINED_WEIGHT \
+# In order to use pretrained weight, set pretrained_weight to 1 and checkpoint_dir to the pretrained model directory
+# --pretrained_weight 1 \
+# --checkpoint_dir $PRETRAINED_WEIGHT \
 
 torchrun $DISTRIBUTED_ARGS tp_pp_dsk_run.py \
     --model_path $MODEL_PATH \
@@ -117,12 +113,12 @@ torchrun $DISTRIBUTED_ARGS tp_pp_dsk_run.py \
     --pretrained_weight 1 \
     --checkpoint_dir $PRETRAINED_WEIGHT \
     --checkpoint_freq 5000 \
-    --lr 0.00015 \
+    --lr 0.0001 \
     --min_lr 1e-05 \
     --beta1 0.9 \
     --beta2 0.95 \
     --weight_decay 0.1 \
-    --warmup_steps 2000 \
+    --warmup_steps 1000 \
     --constant_steps 0 \
     --use_zero1_optimizer 1 \
     --use_selective_checkpoint 1 \

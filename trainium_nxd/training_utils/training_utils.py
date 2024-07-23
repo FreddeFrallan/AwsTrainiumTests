@@ -45,7 +45,7 @@ def pack_dataset(dataset, chunk_length=2048):
 
         # Split by chunks of max_len.
         result = {
-            k: [t[i : i + chunk_length] for i in range(0, batch_chunk_length, chunk_length)]
+            k: [t[i: i + chunk_length] for i in range(0, batch_chunk_length, chunk_length)]
             for k, t in concatenated_examples.items()
         }
         # add remainder to global variable for next batch
@@ -126,7 +126,6 @@ def create_llama_pretraining_dataset(data_dir, mini_batch_size, dp_size, dp_rank
         pin_memory=True,
     )
     return train_dataloader, None
-
 
 
 def create_dsk_pretraining_dataset(data_dir, mini_batch_size, dp_size, dp_rank, seed):
@@ -378,12 +377,12 @@ class MovingAvgWindowMetirc:
             self.window_time -= self.moving_avg_window.get()
             window_size -= 1
         return self.compute_metric(window_size)
-        
 
     def compute_metric(self, window_size):
         '''Compute metric value based on class specific data and average window
         '''
         pass
+
 
 class Throughput(MovingAvgWindowMetirc):
     def __init__(self, batch_size, world_size, grad_accum_usteps, moving_avg_window_size=10, logging_interval=1):
@@ -392,16 +391,48 @@ class Throughput(MovingAvgWindowMetirc):
 
     def compute_metric(self, window_size):
         return window_size * self.seqs_per_iteration / self.window_time
-    
+
+
 class MFU(MovingAvgWindowMetirc):
-    def __init__(self, batch_size, world_size, grad_accum_usteps, seq_length, model_FLOP, nc_FLOPS, no_neuron_cores, moving_avg_window_size=10, logging_interval=1):
+    def __init__(self, batch_size, world_size, grad_accum_usteps, seq_length, number_of_neuron_cores, config, moving_avg_window_size=10, logging_interval=1):
         '''Computes Model FLOPs utilization (MFU): https://arxiv.org/pdf/2204.02311 (see Appendix B)
         This metric tells what is the utilization of the hardware FLOPS as a ratio of the maximum FLOPS
+        config should be a dictionary with the following entries:
+        'model_FLOP' = 12345 # number of floatin point operations for model for forward&backward pass
+        or if this key is missing, just a model config (transformers.AutoConfig). And the FLOP will be computed
         '''
         super().__init__(moving_avg_window_size, logging_interval)
+        THEORETICAL_NC_FLOPS = 47500000000000
         self.tokens_per_iteration = batch_size * world_size * grad_accum_usteps * logging_interval * seq_length
-        self.model_FLOP = model_FLOP
-        self.hw_FLOPS = no_neuron_cores * nc_FLOPS
+        self.hw_FLOPS = number_of_neuron_cores * THEORETICAL_NC_FLOPS
+        print(f"MFU init: HW_FLOPS for this run is {self.hw_FLOPS/1e12} TFLOPS ({number_of_neuron_cores} neuron cores * {THEORETICAL_NC_FLOPS/1e12} TFLOPS)")
+        if 'model_FLOP' in config:
+            self.model_FLOP = config['model_FLOP']
+            print(f"MFU init: Using provided FLOP for the model: {config['model_FLOP']/1e9} GFLOP")
+        else:
+            n_layers = config['num_hidden_layers']
+            n_heads = config['num_attention_heads']
+            d_model = config['hidden_size']
+            n_vocab = config['vocab_size']
+            forward_FLOP = self.openai_flops_per_token(n_layers, n_heads, d_model, seq_length, n_vocab)
+            self.model_FLOP = 3 * forward_FLOP # assuming that backward pass takes 2x forward pass flops
+            print(f"MFU init: Using computed FLOP for the model: {self.model_FLOP/1e9} GFLOP")
+
+    @staticmethod
+    def openai_flops_per_token(n_layers, n_heads, d_model, n_ctx, n_vocab, ff_ratio=4):
+        """Open AI method for forward pass FLOPs counting of decoder-only Transformer
+        """
+        d_attn = d_model // n_heads
+        d_ff = d_model * ff_ratio
+
+        embeddings = 4 * d_model
+        attn_qkv = 2 * n_layers * d_model * 3 * (d_attn * n_heads)
+        attn_mask = 2 * n_layers * n_ctx * (d_attn * n_heads)
+        attn_project = 2 * n_layers * (d_attn * n_heads) * d_model
+        ff = 2 * n_layers * 2 * d_model * d_ff
+        logits = 2 * d_model * n_vocab
+
+        return embeddings + attn_qkv + attn_mask + attn_project + ff + logits
 
     def compute_metric(self, window_size):
         tokens_per_second = window_size * self.tokens_per_iteration / self.window_time

@@ -34,9 +34,6 @@ from transformers import LlamaConfig
 
 import neuronx_distributed as nxd
 from neuronx_distributed.parallel_layers import (
-    ColumnParallelLinear,
-    ParallelEmbedding,
-    RowParallelLinear,
     mappings,
     parallel_state,
 )
@@ -44,8 +41,7 @@ from neuronx_distributed.parallel_layers.parallel_state import (
     get_data_parallel_rank,
     get_data_parallel_size,
     get_pipeline_model_parallel_rank,
-    get_tensor_model_parallel_rank,
-    initialize_model_parallel,
+    get_tensor_model_parallel_rank
 )
 # For delayed parameter inititalization
 # Check https://pytorch.org/torchdistx/latest/deferred_init.html
@@ -56,6 +52,7 @@ except ImportError:
 
 from collections import namedtuple
 
+# to use training_utils
 EXTRA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 # print(f"Adding {EXTRA_PATH} to the sys path...")
 sys.path.append(EXTRA_PATH)
@@ -66,21 +63,16 @@ from trainium_nxd.training_utils.modeling_llama_nxd import (
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaRMSNorm,
-    init_weights,
-    test_pce_function
+    init_weights
 )
 
 from trainium_nxd.training_utils.training_utils import (
     Throughput,
-    TrainingMetrics,
-    create_llama_pretraining_dataset,
+    MFU,
     create_dsk_pretraining_dataset,
-    create_partition,
-    get_dtype,
     get_learning_rate_scheduler,
     get_param_groups_by_weight_decay,
     get_sin_cos_matrix,
-    print_logs,
 )
 
 from neuronx_distributed.utils.adamw_fp32_optim_params import AdamW_FP32OptimParams
@@ -95,6 +87,7 @@ def is_flag_true(flag):
 def train_dsk(args):
     if dist.get_rank() == 0:
         print(f"args {args}")
+        print("Initializing model and optimizer...")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -177,8 +170,6 @@ def train_dsk(args):
     world_size = parallel_state.get_data_parallel_size()
     # model_dtype = get_dtype(model)
 
-    device = xm.xla_device()
-
     param_groups = get_param_groups_by_weight_decay(model)
 
     opt_cls = AdamW_FP32OptimParams if args.use_fp32_optimizer > 0 else torch.optim.AdamW
@@ -190,12 +181,11 @@ def train_dsk(args):
     dp_size = get_data_parallel_size()
     tp_rank = get_tensor_model_parallel_rank()
     pp_rank = get_pipeline_model_parallel_rank()
+    num_neuroncores = dp_size * args.tensor_parallel_size * args.pipeline_parallel_size
 
     lr_scheduler = get_learning_rate_scheduler(optimizer, args)
 
-    # train_dataloader, _ = create_llama_pretraining_dataset(
-    #     args.training_dir, args.train_batch_size, dp_size, dp_rank, args.seed
-    # )
+    print(f"Loading training dataset from {args.training_dir}")
 
     train_dataloader, _ = create_dsk_pretraining_dataset(
         args.training_dir,
@@ -205,10 +195,12 @@ def train_dsk(args):
         args.seed,
     )
 
+    # looks like pl.MpDeviceLoader is not needed for DDP in this case
     # train_device_loader = pl.MpDeviceLoader(train_dataloader, device)
     train_device_loader = train_dataloader
 
     if is_flag_true(args.do_eval):
+        print(f"Loading evaluation dataset from {args.training_dir}")
         eval_dataloader, _ = create_dsk_pretraining_dataset(
             args.eval_data_dir,
             args.train_batch_size,
@@ -221,9 +213,7 @@ def train_dsk(args):
     else:
         eval_device_loader = None
 
-
-
-    print("Creating sample dataloader finished")
+    print("Datasets are now loaded, checking available model checkpoints")
 
     # Only print/logging on the last PP rank of the first PP group
     # Since loss is only in the last PP rank
@@ -245,6 +235,8 @@ def train_dsk(args):
 
     tag = get_loading_tag(args)
     if tag != "-1":
+        if should_print:
+            print(f"Loading model with tag: {tag}")
         user_content = nxd.load_checkpoint(
             args.checkpoint_dir,
             tag=tag,
@@ -256,6 +248,8 @@ def train_dsk(args):
             resume_batch_idx = user_content["batch_idx"]
             total_steps = user_content["total_steps"]
     elif args.pretrained_weight==1: # 1 (exist) or 0
+        if should_print:
+            print(f"Loading \"pretrained_weight\" from {args.checkpoint_dir}")
         user_content = nxd.load_checkpoint(
            args.checkpoint_dir,
            tag="pretrained_weight",
@@ -267,33 +261,34 @@ def train_dsk(args):
             # We need to do init_zero1 here since after loading model weights, we
             # need to sync the new params with base optimzier params.
             optimizer.optimizer.init_zero()
+    else:
+        if should_print:
+            print(f"No model checkpoint to load, starting with randomly initialized weights")
 
 
     epoch = 0
-    throughput = Throughput(args.train_batch_size, dp_size, 1, 10, args.logging_interval)
-    metric_writer = TrainingMetrics(args.metrics_file)
+    throughput = Throughput(
+        batch_size=args.train_batch_size,
+        world_size=dp_size,
+        grad_accum_usteps=1,
+        moving_avg_window_size=10,
+        logging_interval=args.logging_interval
+    )
+    mfu = MFU(
+        batch_size=args.train_batch_size,
+        world_size=dp_size,
+        grad_accum_usteps=1,
+        seq_length=args.seq_len,
+        number_of_neuron_cores=num_neuroncores,
+        config=model.config.__dict__,
+        moving_avg_window_size=10,
+        logging_interval=args.logging_interval
+    )
     print("--------TRAINING CONFIG----------")
     print(args)
     print("--------MODEL CONFIG----------")
     print(model.config)
     print("---------------------------------")
-    # "Model configuration": config,
-    param_contents = {
-        "Model": model.config.model_type,
-        "World size": xm.xrt_world_size(),
-        "Data parallel degree": world_size,
-        "Batch size": args.train_batch_size,
-        "Total steps": args.max_steps,
-        "Seed": args.seed,
-        # "Optimizer": str(optimizer),
-        "Warmup steps": args.warmup_steps,
-        "Dataset": os.path.basename(os.path.normpath(args.training_dir)),
-        # "Environment variables": {
-        #     variable: value
-        #     for variable, value in os.environ.items()
-        #     if variable.startswith("NEURON") or variable.startswith("XLA")
-        # }
-    }
 
     def _evaluation_loop():  # start with the build in parallel entropy
         if should_print:
@@ -301,7 +296,7 @@ def train_dsk(args):
         model.eval()
         eval_loss = 0.0
         steps = 0
-        for data in tqdm.tqdm(eval_dataloader, desc='Evaluation batches', disable=(not should_print)):
+        for data in tqdm.tqdm(eval_device_loader, desc='Evaluation batches', disable=(not should_print)):
             input_ids = data["input_ids"]
             attention_mask = torch.ones((input_ids.shape))
             labels = data["labels"]
@@ -322,8 +317,6 @@ def train_dsk(args):
         if should_print:
             print(f"MEAN EVALUATION LOSS: {eval_loss / steps}\n{'-' * 20}", flush=True)
 
-    if should_print:
-        metric_writer.store_parameters(param_contents)
     # test_pce_function()
     # return
     while True:
@@ -343,18 +336,11 @@ def train_dsk(args):
             # Enavle auto-mix-precision if needed
             with torch.autocast(enabled=args.use_amp > 0, dtype=torch.bfloat16, device_type="cuda"):
                 # Calling model.run_train instead of model forward to use the PP runtime
-                # if should_print:
-                #     print("DEBUG INFO IN THE TRAINING LOOP")
-                #     print(f"{input_ids.shape=}, {labels.shape=}, {attention_mask.shape=}")
-                #     print(f"inputs 10: {input_ids[:10]}")
-                #     print(f"labels 10: {labels[:10]}")
                 loss = model.run_train(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels,
                 )
-                # if should_print:
-                #     print(f"DEBUG Loss: {loss} ({type(loss)=})")
             total_steps += 1
             optimizer.step()
             global_norm = optimizer.grad_norm  # Global norm before clipping
@@ -367,10 +353,10 @@ def train_dsk(args):
                         total_steps,
                         loss.detach(),
                         global_norm,
-                        # lr_scheduler.get_lr()[0],
                         lr_scheduler.get_last_lr()[0],
                         input_ids.detach(),
-                        throughput.get_value(),
+                        throughput,
+                        mfu,
                         start,
                     ),
                 )
@@ -402,7 +388,7 @@ def train_dsk(args):
 
     final_time = time.time()
     time_diff = final_time - start
-    # record aggregate & final statistics in the metrics file
+    # record aggregate & final statistics
     additional_data = {"Epoch": epoch, "Global step": total_steps}
     min_throughput_index = math.ceil(10 / args.logging_interval)
     if len(logger.throughputs) > min_throughput_index:
@@ -434,7 +420,7 @@ def train_dsk(args):
         ),
     ]
     if should_print:
-        metric_writer.store_metrics(metric_data)
+        print(f"Training metadata: {metric_data}")
     print("Training finished successfully")
 
 
@@ -453,7 +439,7 @@ if __name__ == "__main__":
     parser.add_argument("--pipeline_parallel_size", type=int, default=1, help="PP size")
     parser.add_argument("--kv_replicator", type=int, default=1, help="KV replication size")
     parser.add_argument("--ignore_index", type=int, default=-100, help="Ignore index for cross entropy loss")
-    parser.add_argument("--seq_len", type=int, default=4096, help="PP size")
+    parser.add_argument("--seq_len", type=int, default=4096, help="context length")
     parser.add_argument("--training_dir", type=str, default=None)
     parser.add_argument("--do_eval", type=int, default=False, help="Perform evaluation too.")
     parser.add_argument("--eval_data_dir", type=str, help="Pre-tokenized evaluation dataset directory.")
@@ -484,7 +470,7 @@ if __name__ == "__main__":
         default=0,
         help="whether to use asynchronous checkpoint saving. 1 for using, 0 for not using. Default is 0",
     )
-    parser.add_argument("--metrics_file", type=str, default="results.json", help="training metrics results file")
+    parser.add_argument("--logging_interval", type=int, default=10, help="Log every X steps (global steps)")
     # optimization
     opt_grp = parser.add_argument_group(title="optimization", description="arguments for optimization")
     opt_grp.add_argument("--weight_decay", default=0.01, type=float, help="weight decay")
@@ -513,7 +499,6 @@ if __name__ == "__main__":
         default=None,
         help="Minumum value for learning rate. The scheduler" "clip values below this threshold.",
     )
-    lr_grp.add_argument("--logging_interval", type=int, default=10, help="number of warmup_steps")
 
     args, _ = parser.parse_known_args()
     # Workaround for NaNs seen with transformers version >= 4.21.0
