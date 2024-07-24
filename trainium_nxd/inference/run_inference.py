@@ -54,11 +54,23 @@ def inference_test():
     #     'deepseek-ai/deepseek-coder-33b-base',\
     #     4
 
-    # DSK-base 1.3b PRETRAINED
+    # DSK 33b pretrained
     MODEL_TO_USE, TOKENIZER_TO_USE, TP_DEGREE = \
-        '/home/ubuntu/dev/tp_dsk_ndx_pretrain/inference/sft_dsk13',\
-        'deepseek-ai/deepseek-coder-1.3b-base',\
-        8
+        '/home/ubuntu/dsk33b/consolidated/test1/pytorchmodel',\
+        'deepseek-ai/deepseek-coder-33b-base',\
+        32
+
+    # DSK-base 1.3b
+    # MODEL_TO_USE, TOKENIZER_TO_USE, TP_DEGREE = \
+    #     'deepseek-ai/deepseek-coder-1.3b-base',\
+    #     'deepseek-ai/deepseek-coder-1.3b-base',\
+    #     8
+
+    # DSK-base 1.3b PRETRAINED
+    # MODEL_TO_USE, TOKENIZER_TO_USE, TP_DEGREE = \
+    #     '/home/ubuntu/dev/tp_dsk_ndx_pretrain/inference/sft_dsk13',\
+    #     'deepseek-ai/deepseek-coder-1.3b-base',\
+    #     8
 
     CONTEXT_LEN = 100
     TO_GENERATE = 500
